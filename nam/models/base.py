@@ -24,6 +24,8 @@ from .._core import InitializableFromConfig
 from .conv_net import ConvNet
 from .linear import Linear
 from .losses import apply_pre_emphasis_filter, esr, multi_resolution_stft_loss, mse_fft
+from .parametric.parametric_models import ParametricLSTM, ParametricWaveNet
+from .parametric.hyper_net import HyperConvNet
 from .recurrent import LSTM
 from .wavenet import WaveNet
 
@@ -118,7 +120,10 @@ class _LossItem(NamedTuple):
 
 
 _model_net_init_registry = {
+    "ParametricLSTM": ParametricLSTM.init_from_config,
+    "ParametricWaveNet": ParametricWaveNet.init_from_config,
     "ConvNet": ConvNet.init_from_config,
+    "HyperConvNet": HyperConvNet.init_from_config,
     "Linear": Linear.init_from_config,
     "LSTM": LSTM.init_from_config,
     "WaveNet": WaveNet.init_from_config,
@@ -157,6 +162,8 @@ class Model(pl.LightningModule, InitializableFromConfig):
     @classmethod
     def init_from_config(cls, config):
         checkpoint_path = config.get("checkpoint_path")
+        if checkpoint_path is not None:
+            print("Loading from checkpoint: " + checkpoint_path)
         config = cls.parse_config(config)
         return (
             cls(**config)

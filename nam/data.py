@@ -21,6 +21,7 @@ import wavio
 from scipy.interpolate import interp1d
 from torch.utils.data import Dataset as _Dataset
 from tqdm import tqdm
+import struct
 
 from ._core import InitializableFromConfig
 
@@ -67,6 +68,40 @@ class AudioShapeMismatchError(ValueError, DataError):
     def shape_actual(self):
         return self._shape_actual
 
+def bad_to_np(filename: Union[str, Path], info: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, WavInfo]]:
+    #Print. (:
+    print(f"Reading {filename}")
+
+    #Open the file.
+    file = open(filename, "rb")
+
+    #Read the sample rate.
+    sample_rate = struct.unpack('<I', file.read(4))[0]
+    print(sample_rate)
+
+    #Read the number of samples. Should be 267840000
+    number_of_samples = struct.unpack('<Q', file.read(8))[0]
+    print(number_of_samples)
+
+    #Read the samples.
+    samples = np.fromfile(file, dtype=np.float32, count=number_of_samples)
+
+    #Close the file.
+    file.close()
+
+    #Return the data.
+    return samples if not info else (samples, WavInfo(4, sample_rate))
+
+def bad_to_tensor(
+    *args, info: bool = False, **kwargs
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, WavInfo]]:
+    out = bad_to_np(*args, info=info, **kwargs)
+    if info:
+        arr, info = out
+        return torch.Tensor(arr), info
+    else:
+        arr = out
+        return torch.Tensor(arr)
 
 def wav_to_np(
     filename: Union[str, Path],
@@ -160,7 +195,10 @@ def np_to_wav(
 
 class AbstractDataset(_Dataset, abc.ABC):
     @abc.abstractmethod
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int)-> Union[
+        Tuple[torch.Tensor, torch.Tensor],
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ]:
         """
         Get input and output audio segment for training / evaluation.
         :return:
@@ -389,16 +427,34 @@ class Dataset(AbstractDataset, InitializableFromConfig):
                 "instead."
             )
         sample_rate = config.pop("sample_rate", None)
-        x, x_wavinfo = wav_to_tensor(config.pop("x_path"), info=True, rate=sample_rate)
+        x_path = Path(config.pop("x_path"))
+        x_path_extension = x_path.suffix
+
+        if x_path_extension == ".wav":
+            x, x_wavinfo = wav_to_tensor(x_path, info=True, rate=sample_rate)
+        elif x_path_extension == ".bad":
+            x, x_wavinfo = bad_to_tensor(x_path, info=True)
+        else:
+            assert False, "Unknown file format!"
+
         sample_rate = x_wavinfo.rate
         try:
-            y = wav_to_tensor(
-                config.pop("y_path"),
-                rate=sample_rate,
-                preroll=config.pop("y_preroll", None),
-                required_shape=(len(x), 1),
-                required_wavinfo=x_wavinfo,
-            )
+            y_path = Path(config.pop("y_path"))
+            y_path_extension = y_path.suffix
+
+            if y_path_extension == ".wav":
+                y = wav_to_tensor(
+                    y_path,
+                    rate=sample_rate,
+                    preroll=config.pop("y_preroll", None),
+                    required_shape=(len(x), 1),
+                    required_wavinfo=x_wavinfo,
+                )
+            elif y_path_extension == ".bad":
+                y = bad_to_tensor(y_path)
+            else:
+                assert False, "Unknown file format!"
+
         except AudioShapeMismatchError as e:
             # Really verbose message since users see this.
             x_samples, x_channels = e.shape_expected
@@ -661,6 +717,53 @@ class Dataset(AbstractDataset, InitializableFromConfig):
                 "leak into the dataset!"
             )
 
+class ParametricDataset(Dataset):
+
+    def __init__(self, parameters: Dict[str, Union[bool, float, int]], *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._keys = tuple(k for k in parameters.keys())
+        self._values = torch.Tensor([float(parameters[k]) for k in self._keys])
+
+    @classmethod
+    def init_from_config(cls, config):
+        config, x, y, slices = cls.parse_config(config)
+        datasets = []
+        for _slice in tqdm(slices, desc="Slices..."):
+            _config = deepcopy(config)
+            start_samples, number_of_samples, parameters = [_slice[k] for k in ("start_samples", "number_of_samples", "parameters")]
+            include = _slice.get("include", True)
+            _config.update(x=x[start_samples:start_samples + number_of_samples], y=y[start_samples:start_samples + number_of_samples], parameters=parameters)
+
+            if include:
+                datasets.append(ParametricDataset(**_config))
+
+        return ConcatDataset(datasets)
+
+    @classmethod
+    def parse_config(cls, config):
+        slices = config.pop("slices")
+        config = super().parse_config(config)
+        x, y = [config.pop(k) for k in "xy"]
+        return config, x, y, slices
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        :return:
+            Parameter values (D,)
+            Input (NX+NY-1,)
+            Output (NY,)
+        """
+        x, y = super().__getitem__(idx)
+        return self._values, x, y
+
+    @property
+    def keys(self) -> Tuple[str]:
+        return self._keys
+
+    @property
+    def values(self):
+        return self._values
+
 
 class ConcatDataset(AbstractDataset, InitializableFromConfig):
     def __init__(self, datasets: Sequence[Dataset], flatten=True):
@@ -743,8 +846,12 @@ class ConcatDataset(AbstractDataset, InitializableFromConfig):
                     f"Mismatch between ny of datasets {ref_ny.index} ({ref_ny.val}) and {i} ({d.ny})"
                 )
 
+    @property
+    def sample_rate(self) -> Optional[float]:
+        # Just take the first data set.
+        return self.datasets[0].sample_rate
 
-_dataset_init_registry = {"dataset": Dataset.init_from_config}
+_dataset_init_registry = {"dataset": Dataset.init_from_config, "parametric": ParametricDataset.init_from_config}
 
 
 def register_dataset_initializer(

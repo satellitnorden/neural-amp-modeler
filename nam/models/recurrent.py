@@ -201,7 +201,7 @@ class LSTM(BaseNet):
     def export_cpp_header(self, filename: Path):
         with TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
-            LSTM.export(self, Path(tmpdir))  # Hacky...need to work w/ CatLSTM
+            LSTM.export(self, Path(tmpdir))  # Hacky...need to work w/ ParamtricLSTM
             with open(Path(tmpdir, "model.nam"), "r") as fp:
                 _c = json.load(fp)
             version = _c["version"]

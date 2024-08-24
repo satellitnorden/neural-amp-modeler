@@ -15,9 +15,13 @@ from pytorch_lightning.utilities.warnings import PossibleUserWarning
 import torch
 from torch.utils.data import DataLoader
 
-from nam.data import ConcatDataset, Split, init_dataset
+from nam.data import ConcatDataset, ParametricDataset, Split, init_dataset
 from nam.models import Model
 from nam.util import filter_warnings
+from nam.models._base import BaseNet  # HACK access
+from nam.models.parametric import params
+from nam.util import filter_warnings, timestamp
+from argparse import ArgumentParser
 
 torch.manual_seed(0)
 
@@ -38,6 +42,7 @@ def _plot(
     show=True,
     window_start: Optional[int] = None,
     window_end: Optional[int] = None,
+    index: Optional[int] = None
 ):
     if isinstance(ds, ConcatDataset):
 
@@ -49,21 +54,34 @@ def _plot(
             stem = savefig.name[: -len(extension) - 1]
             return Path(savefig.parent, f"{stem}_{i}.{extension}")
 
-        for i, ds_i in enumerate(ds.datasets):
+        if index != None:
             _plot(
-                model,
-                ds_i,
-                savefig=extend_savefig(i, savefig),
-                show=show and i == len(ds.datasets) - 1,
-                window_start=window_start,
-                window_end=window_end,
-            )
+                    model,
+                    ds.datasets[index],
+                    savefig=extend_savefig(index, savefig),
+                    show=show,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
+
+        else:
+            for i, ds_i in enumerate(ds.datasets):
+                _plot(
+                    model,
+                    ds_i,
+                    savefig=extend_savefig(i, savefig),
+                    show=show and i == len(ds.datasets) - 1,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
+
         return
     with torch.no_grad():
         tx = len(ds.x) / 48_000
         print(f"Run (t={tx:.2f})")
         t0 = time()
-        output = model(ds.x).flatten().cpu().numpy()
+        args = (ds.values, ds.x) if isinstance(ds, ParametricDataset) else (ds.x,)
+        output = model(*args).flatten().cpu().numpy()
         t1 = time()
         try:
             rt = f"{tx / (t1 - t0):.2f}"
@@ -128,10 +146,11 @@ def main(
     data_config,
     model_config,
     learning_config,
-    outdir: Path,
-    no_show: bool = False,
-    make_plots=True,
+    outdir: Path
 ):
+    #Uncomment to disable GPU training (I think). Makes it slower, but also means you can use your computer in the meanwhile. (:
+    #torch.backends.cudnn.enabled = False
+
     if not outdir.exists():
         raise RuntimeError(f"No output location found at {outdir}")
     # Write
@@ -184,15 +203,46 @@ def main(
         )
     model.cpu()
     model.eval()
-    if make_plots:
+
+    if "slices" not in data_config["common"]:
         _plot(
-            model,
-            dataset_validation,
-            savefig=Path(outdir, "comparison.png"),
-            window_start=100_000,
-            window_end=110_000,
-            show=False,
-        )
-        _plot(model, dataset_validation, show=not no_show)
+                model,
+                dataset_validation,
+                savefig=Path(outdir, "comparison.png"),
+                window_start=100_000,
+                window_end=110_000
+            )
+
+    if "plot_indices" in data_config:
+        plot_indices = data_config["plot_indices"]
+
+        for plot_index in plot_indices:
+            _plot(
+                model,
+                dataset_validation,
+                savefig=Path(outdir, "comparison.png"),
+                window_start=100_000,
+                window_end=110_000,
+                index=plot_index
+            )
+
     # Export!
-    model.net.export(outdir)
+    if "parameters" in data_config:
+        parameters = data_config["parameters"]
+
+        _parameters = { }
+
+        for _parameter in parameters:
+            _parameters[_parameter] = params.ContinuousParam(parameters[_parameter]["default_value"], parameters[_parameter]["minimum_value"], parameters[_parameter]["maximum_value"])
+        
+        model.net.export(outdir, _parameters)
+    else:
+        model.net.export(outdir)
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument("data_config_path", type=str)
+    parser.add_argument("model_config_path", type=str)
+    parser.add_argument("learning_config_path", type=str)
+    parser.add_argument("outdir")
+    main(parser.parse_args())
