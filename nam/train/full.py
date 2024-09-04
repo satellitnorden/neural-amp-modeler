@@ -179,8 +179,8 @@ def main(
             f"{dataset_train.sample_rate}, {dataset_validation.sample_rate}"
         )
     model.net.sample_rate = dataset_train.sample_rate
-    train_dataloader = DataLoader(dataset_train, **learning_config["train_dataloader"])
     val_dataloader = DataLoader(dataset_validation, **learning_config["val_dataloader"])
+    train_dataloader = DataLoader(dataset_train, **learning_config["train_dataloader"])
 
     trainer = pl.Trainer(
         callbacks=_create_callbacks(learning_config),
