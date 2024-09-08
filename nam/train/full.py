@@ -171,8 +171,8 @@ def main(
         )
     data_config["common"]["nx"] = model.net.receptive_field
 
-    dataset_train = init_dataset(data_config, Split.TRAIN)
     dataset_validation = init_dataset(data_config, Split.VALIDATION)
+    dataset_train = init_dataset(data_config, Split.TRAIN)
     if dataset_train.sample_rate != dataset_validation.sample_rate:
         raise RuntimeError(
             "Train and validation data loaders have different data set sample rates: "
