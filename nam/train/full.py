@@ -150,6 +150,7 @@ def main(
 ):
     #Uncomment to disable GPU training (I think). Makes it slower, but also means you can use your computer in the meanwhile. (:
     #torch.backends.cudnn.enabled = False
+    #torch.set_float32_matmul_precision("high") #Should be faster?
 
     if not outdir.exists():
         raise RuntimeError(f"No output location found at {outdir}")
