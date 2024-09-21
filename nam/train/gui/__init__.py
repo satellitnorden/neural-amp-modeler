@@ -11,7 +11,9 @@ Usage:
 """
 
 import re
+import requests
 import tkinter as tk
+import subprocess
 import sys
 import webbrowser
 from dataclasses import dataclass
@@ -19,7 +21,7 @@ from enum import Enum
 from functools import partial
 from pathlib import Path
 from tkinter import filedialog
-from typing import Callable, Dict, Optional, Sequence
+from typing import Callable, Dict, NamedTuple, Optional, Sequence
 
 try:  # 3rd-party and 1st-party imports
     import torch
@@ -33,15 +35,13 @@ try:  # 3rd-party and 1st-party imports
     # Ok private access here--this is technically allowed access
     from nam.train import metadata
     from nam.train._names import INPUT_BASENAMES, LATEST_VERSION
-    from nam.train.metadata import TRAINING_KEY
+    from nam.train._version import Version, get_current_version
 
     _install_is_valid = True
     _HAVE_ACCELERATOR = torch.cuda.is_available() or torch.backends.mps.is_available()
 except ImportError:
     _install_is_valid = False
     _HAVE_ACCELERATOR = False
-
-__all__ = ["run"]
 
 if _HAVE_ACCELERATOR:
     _DEFAULT_NUM_EPOCHS = 100
@@ -72,7 +72,7 @@ _SYSTEM_TEXT_COLOR = "systemTextColor" if _is_mac() else "black"
 
 
 @dataclass
-class _AdvancedOptions(object):
+class AdvancedOptions(object):
     """
     :param architecture: Which architecture to use.
     :param num_epochs: How many epochs to train for.
@@ -214,6 +214,7 @@ class _InputPathButton(_PathButton):
     @classmethod
     def _download_input_file(cls):
         file_urls = {
+            "input.wav": "https://drive.google.com/file/d/1KbaS4oXXNEuh2aCPLwKrPdf5KFOjda8G/view?usp=drive_link",
             "v3_0_0.wav": "https://drive.google.com/file/d/1Pgf8PdE0rKB1TD4TRPKbpNo1ByR3IOm9/view?usp=drive_link",
             "v2_0_0.wav": "https://drive.google.com/file/d/1xnyJP_IZ7NuyDSTJfn-Jmc5lw0IE7nfu/view?usp=drive_link",
             "v1_1_1.wav": "",
@@ -260,7 +261,6 @@ class _CheckboxKeys(Enum):
     Keys for checkboxes
     """
 
-    FIT_CAB = "fit_cab"
     SILENT_TRAINING = "silent_training"
     SAVE_PLOT = "save_plot"
 
@@ -386,9 +386,16 @@ class _GUIWidgets(Enum):
     METADATA = "metadata"
     ADVANCED_OPTIONS = "advanced_options"
     TRAIN = "train"
+    UPDATE = "update"
 
 
-class _GUI(object):
+@dataclass
+class Checkbox(object):
+    variable: tk.BooleanVar
+    check_button: tk.Checkbutton
+
+
+class GUI(object):
     def __init__(self):
         self._root = tk.Tk()
         self._root.title(f"NAM Trainer - v{__version__}")
@@ -448,13 +455,15 @@ class _GUI(object):
         # Last frames: avdanced options & train in the SE corner:
         self._frame_advanced_options = tk.Frame(self._root)
         self._frame_train = tk.Frame(self._root)
-        # Pack train first so that it's on bottom.
+        self._frame_update = tk.Frame(self._root)
+        # Pack must be in reverse order
+        self._frame_update.pack(side=tk.BOTTOM, anchor="e")
         self._frame_train.pack(side=tk.BOTTOM, anchor="e")
         self._frame_advanced_options.pack(side=tk.BOTTOM, anchor="e")
 
         # Advanced options for training
         default_architecture = core.Architecture.STANDARD
-        self.advanced_options = _AdvancedOptions(
+        self.advanced_options = AdvancedOptions(
             default_architecture,
             _DEFAULT_NUM_EPOCHS,
             _DEFAULT_DELAY,
@@ -483,7 +492,21 @@ class _GUI(object):
         )
         self._widgets[_GUIWidgets.TRAIN].pack()
 
+        self._pack_update_button_if_update_is_available()
+
         self._check_button_states()
+
+    def get_mrstft_fit(self) -> bool:
+        """
+        Use a pre-emphasized multi-resolution shot-time Fourier transform loss during
+        training.
+
+        This improves agreement in the high frequencies, usually with a minimial loss in
+        ESR.
+        """
+        # Leave this as a public method to anticipate an extension to make it
+        # changeable.
+        return True
 
     def _check_button_states(self):
         """
@@ -509,11 +532,6 @@ class _GUI(object):
         self._frame_checkboxes.pack(side=tk.LEFT)
         row = 1
 
-        @dataclass
-        class Checkbox(object):
-            variable: tk.BooleanVar
-            check_button: tk.Checkbutton
-
         def make_checkbox(
             key: _CheckboxKeys, text: str, default_value: bool
         ) -> Checkbox:
@@ -526,7 +544,6 @@ class _GUI(object):
             self._widgets[key] = check_button  # For tracking in set-all-widgets ops
 
         self._checkboxes: Dict[_CheckboxKeys, Checkbox] = dict()
-        make_checkbox(_CheckboxKeys.FIT_CAB, "Cab modeling", False)
         make_checkbox(
             _CheckboxKeys.SILENT_TRAINING,
             "Silent run (suggested for batch training)",
@@ -551,7 +568,7 @@ class _GUI(object):
         Open window for advanced options
         """
 
-        self._wait_while_func(lambda resume: _AdvancedOptionsGUI(resume, self))
+        self._wait_while_func(lambda resume: AdvancedOptionsGUI(resume, self))
 
     def _open_metadata(self):
         """
@@ -559,6 +576,93 @@ class _GUI(object):
         """
 
         self._wait_while_func(lambda resume: _UserMetadataGUI(resume, self))
+
+    def _pack_update_button(self, version_from: Version, version_to: Version):
+        """
+        Pack a button that a user can click to update
+        """
+
+        def update_nam():
+            result = subprocess.run(
+                [
+                    f"{sys.executable}",
+                    "-m",
+                    "pip",
+                    "install",
+                    "--upgrade",
+                    "neural-amp-modeler",
+                ]
+            )
+            if result.returncode == 0:
+                self._wait_while_func(
+                    (lambda resume, *args, **kwargs: _OkModal(resume, *args, **kwargs)),
+                    "Update complete! Restart NAM for changes to take effect.",
+                )
+            else:
+                self._wait_while_func(
+                    (lambda resume, *args, **kwargs: _OkModal(resume, *args, **kwargs)),
+                    "Update failed! See logs.",
+                )
+
+        self._widgets[_GUIWidgets.UPDATE] = tk.Button(
+            self._frame_update,
+            text=f"Update ({str(version_from)} -> {str(version_to)})",
+            width=_BUTTON_WIDTH,
+            height=_BUTTON_HEIGHT,
+            command=update_nam,
+        )
+        self._widgets[_GUIWidgets.UPDATE].pack()
+
+    def _pack_update_button_if_update_is_available(self):
+        class UpdateInfo(NamedTuple):
+            available: bool
+            current_version: Version
+            new_version: Optional[Version]
+
+        def get_info() -> UpdateInfo:
+            # TODO error handling
+            url = f"https://api.github.com/repos/sdatkinson/neural-amp-modeler/releases"
+            current_version = get_current_version()
+            try:
+                response = requests.get(url)
+            except requests.exceptions.ConnectionError:
+                print("WARNING: Failed to reach the server to check for updates")
+                return UpdateInfo(
+                    available=False, current_version=current_version, new_version=None
+                )
+            if response.status_code != 200:
+                print(f"Failed to fetch releases. Status code: {response.status_code}")
+                return UpdateInfo(
+                    available=False, current_version=current_version, new_version=None
+                )
+            else:
+                releases = response.json()
+                latest_version = None
+                if releases:
+                    for release in releases:
+                        tag = release["tag_name"]
+                        if not tag.startswith("v"):
+                            print(f"Found invalid version {tag}")
+                        else:
+                            this_version = Version.from_string(tag[1:])
+                            if latest_version is None or this_version > latest_version:
+                                latest_version = this_version
+                else:
+                    print("No releases found for this repository.")
+            update_available = (
+                latest_version is not None and latest_version > current_version
+            )
+            return UpdateInfo(
+                available=update_available,
+                current_version=current_version,
+                new_version=latest_version,
+            )
+
+        update_info = get_info()
+        if update_info.available:
+            self._pack_update_button(
+                update_info.current_version, update_info.new_version
+            )
 
     def _resume(self):
         self._set_all_widget_states_to(tk.NORMAL)
@@ -617,7 +721,7 @@ class _GUI(object):
                 modelname=basename,
                 ignore_checks=ignore_checks,
                 local=True,
-                fit_cab=self._checkboxes[_CheckboxKeys.FIT_CAB].variable.get(),
+                fit_mrstft=self.get_mrstft_fit(),
                 threshold_esr=threshold_esr,
                 user_metadata=user_metadata,
             )
@@ -888,16 +992,51 @@ class _LabeledText(object):
             return None
 
 
-class _AdvancedOptionsGUI(object):
+class AdvancedOptionsGUI(object):
     """
     A window to hold advanced options (Architecture and number of epochs)
     """
 
-    def __init__(self, resume_main, parent: _GUI):
+    def __init__(self, resume_main, parent: GUI):
         self._parent = parent
-        self._root = _TopLevelWithOk(self._apply, resume_main)
+        self._root = _TopLevelWithOk(self.apply, resume_main)
         self._root.title("Advanced Options")
 
+        self.pack_options()
+
+        # "Ok": apply and destroy
+        self._frame_ok = tk.Frame(self._root)
+        self._frame_ok.pack()
+        self._button_ok = tk.Button(
+            self._frame_ok,
+            text="Ok",
+            width=_BUTTON_WIDTH,
+            height=_BUTTON_HEIGHT,
+            command=lambda: self._root.destroy(pressed_ok=True),
+        )
+        self._button_ok.pack()
+
+    def apply(self):
+        """
+        Set values to parent and destroy this object
+        """
+        self._parent.advanced_options.architecture = self._architecture.get()
+        epochs = self._epochs.get()
+        if epochs is not None:
+            self._parent.advanced_options.num_epochs = epochs
+        latency = self._latency.get()
+        # Value None is returned as "null" to disambiguate from non-set.
+        if latency is not None:
+            self._parent.advanced_options.latency = (
+                None if latency == "null" else latency
+            )
+        threshold_esr = self._threshold_esr.get()
+        if threshold_esr is not None:
+            self._parent.advanced_options.threshold_esr = (
+                None if threshold_esr == "null" else threshold_esr
+            )
+
+    def pack_options(self):
         # Architecture: radio buttons
         self._frame_architecture = tk.Frame(self._root)
         self._frame_architecture.pack()
@@ -940,44 +1079,12 @@ class _AdvancedOptionsGUI(object):
             type=_float_or_null,
         )
 
-        # "Ok": apply and destroy
-        self._frame_ok = tk.Frame(self._root)
-        self._frame_ok.pack()
-        self._button_ok = tk.Button(
-            self._frame_ok,
-            text="Ok",
-            width=_BUTTON_WIDTH,
-            height=_BUTTON_HEIGHT,
-            command=lambda: self._root.destroy(pressed_ok=True),
-        )
-        self._button_ok.pack()
-
-    def _apply(self):
-        """
-        Set values to parent and destroy this object
-        """
-        self._parent.advanced_options.architecture = self._architecture.get()
-        epochs = self._epochs.get()
-        if epochs is not None:
-            self._parent.advanced_options.num_epochs = epochs
-        latency = self._latency.get()
-        # Value None is returned as "null" to disambiguate from non-set.
-        if latency is not None:
-            self._parent.advanced_options.latency = (
-                None if latency == "null" else latency
-            )
-        threshold_esr = self._threshold_esr.get()
-        if threshold_esr is not None:
-            self._parent.advanced_options.threshold_esr = (
-                None if threshold_esr == "null" else threshold_esr
-            )
-
 
 class _UserMetadataGUI(object):
     # Things that are auto-filled:
     # Model date
     # gain
-    def __init__(self, resume_main, parent: _GUI):
+    def __init__(self, resume_main, parent: GUI):
         self._parent = parent
         self._root = _TopLevelWithOk(self._apply, resume_main)
         self._root.title("Metadata")
@@ -1081,8 +1188,9 @@ def _install_error():
 
 def run():
     if _install_is_valid:
-        _gui = _GUI()
+        _gui = GUI()
         _gui.mainloop()
+        print("Shut down NAM trainer")
     else:
         _install_error()
 

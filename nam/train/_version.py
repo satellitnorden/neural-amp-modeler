@@ -6,7 +6,7 @@
 Version utility
 """
 
-__all__ = ["PROTEUS_VERSION", "Version"]
+from .._version import __version__
 
 
 class Version:
@@ -14,6 +14,11 @@ class Version:
         self.major = major
         self.minor = minor
         self.patch = patch
+
+    @classmethod
+    def from_string(cls, s: str):
+        major, minor, patch = [int(x) for x in s.split(".")]
+        return cls(major, minor, patch)
 
     def __eq__(self, other) -> bool:
         return (
@@ -23,6 +28,8 @@ class Version:
         )
 
     def __lt__(self, other) -> bool:
+        if self == other:
+            return False
         if self.major != other.major:
             return self.major < other.major
         if self.minor != other.minor:
@@ -35,3 +42,7 @@ class Version:
 
 
 PROTEUS_VERSION = Version(4, 0, 0)
+
+
+def get_current_version() -> Version:
+    return Version.from_string(__version__)
