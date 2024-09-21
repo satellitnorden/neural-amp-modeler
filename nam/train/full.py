@@ -21,6 +21,7 @@ from nam.util import filter_warnings
 from nam.models._base import BaseNet  # HACK access
 from nam.models.parametric import params
 from nam.util import filter_warnings, timestamp
+from nam.train.core import _ModelCheckpoint, _ValidationStopping
 from argparse import ArgumentParser
 
 torch.manual_seed(0)
@@ -94,7 +95,7 @@ def _plot(
     plt.plot(ds.y[window_start:window_end], linestyle="--", label="Target")
     nrmse = _rms(torch.Tensor(output) - ds.y) / _rms(ds.y)
     esr = nrmse**2
-    plt.title(f"ESR={esr:.3f}")
+    plt.title(f"ESR={esr:.4f}")
     plt.legend()
     if savefig is not None:
         plt.savefig(savefig)
@@ -103,6 +104,8 @@ def _plot(
 
 
 def _create_callbacks(learning_config):
+    callbacks = []
+
     """
     Checkpointing, essentially
     """
@@ -120,26 +123,53 @@ def _create_callbacks(learning_config):
             )
         }
 
-    checkpoint_best = pl.callbacks.model_checkpoint.ModelCheckpoint(
-        filename="{epoch:04d}_{step}_{ESR:.3e}_{MSE:.3e}",
-        save_top_k=3,
-        monitor="val_loss",
-        **kwargs,
-    )
+    #TODO: Figure out a way to use the _ModelCheckpoint's.
+    if True:
+        checkpoint_best = pl.callbacks.model_checkpoint.ModelCheckpoint(
+            filename="{epoch:04d}_{step}_{ESR:.3e}_{MSE:.3e}",
+            save_top_k=3,
+            monitor="val_loss",
+            **kwargs,
+        )
 
-    # return [checkpoint_best, checkpoint_last]
-    # The last epoch that was finished.
-    checkpoint_epoch = pl.callbacks.model_checkpoint.ModelCheckpoint(
-        filename="checkpoint_epoch_{epoch:04d}", every_n_epochs=1
-    )
-    if not validate_inside_epoch:
-        return [checkpoint_best, checkpoint_epoch]
+        callbacks.append(checkpoint_best)
+
+        checkpoint_epoch = pl.callbacks.model_checkpoint.ModelCheckpoint(
+            filename="checkpoint_epoch_{epoch:04d}", every_n_epochs=1
+        )
+
+        callbacks.append(checkpoint_epoch)
+
     else:
-        # The last validation pass, whether at the end of an epoch or not
+        callbacks.append(
+            _ModelCheckpoint(
+                filename="checkpoint_best_{epoch:04d}_{step}_{ESR:.4g}_{MSE:.3e}",
+                save_top_k=3,
+                monitor="val_loss",
+                every_n_epochs=1
+            )
+        )
+
+        callbacks.append(
+            _ModelCheckpoint(
+                filename="checkpoint_last_{epoch:04d}_{step}",
+                every_n_epochs=1
+            )
+        )
+
+    if validate_inside_epoch:
         checkpoint_last = pl.callbacks.model_checkpoint.ModelCheckpoint(
             filename="checkpoint_last_{epoch:04d}_{step}", **kwargs
         )
-        return [checkpoint_best, checkpoint_last, checkpoint_epoch]
+
+        callbacks.append(checkpoint_last)
+
+    if "threshold_esr" in learning_config:
+        callbacks.append(
+            _ValidationStopping(monitor="ESR", stopping_threshold=learning_config["threshold_esr"])
+        )
+
+    return callbacks
 
 
 def main(
